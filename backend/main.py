@@ -92,3 +92,75 @@ class Booking(Base):
     booking_date = Column(DateTime, server_default=func.now())
 
 app = FastAPI()
+
+# Dynamic Pricing Engine
+
+# Pricing Tiers: Factor added to the base multiplier
+
+PRICING_TIERS = {
+    "Economy": 0.00,
+    "Business": 0.30,
+    "First": 0.70
+}
+
+def get_tier_factor(seat_class: str) -> float:
+    return PRICING_TIERS.get(seat_class, 0.00)
+
+def get_time_factor(departure_time:datetime)->float:
+    time_difference = departure_time - datetime.now()
+    days_to_departure=time_difference.total_seconds() / (60 * 60 * 24)
+
+    if days_to_departure<0:
+        return 0.5
+    
+    if days_to_departure<3:
+        return 0.25
+    elif days_to_departure<7:
+        return 0.15
+    elif days_to_departure<30:
+        return 0.05
+    elif days_to_departure<90:
+        return -0.10
+    else:
+        return 0.00
+    
+def get_seat_factor(seats_available:int ,total_seats:int)->float:
+    if total_seats==0:
+        return 0.0
+    
+    percentage_available = seats_available / total_seats
+    if percentage_available < 0.1:
+        return 0.30
+    elif percentage_available < 0.25:
+        return 0.15
+    elif percentage_available > 0.75:
+        return -0.05
+    else:
+        return 0.00
+
+def calculate_dynamic_price(flight:Flight,seat_class:str,db:Session)->float:
+    base_price=float(flight.base_price)
+    tier_factor=get_tier_factor(seat_class)
+    time_factor=get_time_factor(flight.departure_time)
+
+    demand_factor_multiplier=float(flight.demand_level)
+    demand_factor=(demand_factor_multiplier - 1.0) 
+
+    total_seats_in_class = db.query(Seat).filter(
+        and_(Seat.flight_id == flight.id, Seat._class == seat_class)
+    ).count()
+    
+    seats_available_in_class = db.query(Seat).filter(
+        and_(Seat.flight_id == flight.id, Seat._class == seat_class, Seat.is_available == True)
+    ).count()
+
+    if total_seats_in_class == 0:
+        return 0.0 
+    
+    seat_factor = get_seat_factor(seats_available_in_class, total_seats_in_class)
+
+    total_factor= tier_factor + time_factor + demand_factor + seat_factor
+
+    final_multiplier=max(1.0 + total_factor, 0.5)
+    final_price=base_price * final_multiplier
+    return round(final_price, 2)
