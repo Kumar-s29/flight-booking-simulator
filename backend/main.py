@@ -164,3 +164,158 @@ def calculate_dynamic_price(flight:Flight,seat_class:str,db:Session)->float:
     final_multiplier=max(1.0 + total_factor, 0.5)
     final_price=base_price * final_multiplier
     return round(final_price, 2)
+
+# Helper Function to generate PNR
+def generate_pnr():
+    return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Flight Booking Simulator API"}
+
+# Core API Endpoints
+
+@app.post("/flights/search")
+def search_flights(search_data:FlightSearchRequest,db:Session=Depends(get_db)):
+    try:
+        departure_date=datetime.strptime(search_data.departure_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    origin_airport=db.query(Airport).filter(Airport.code==search_data.origin.upper()).first()
+    destination_airport=db.query(Airport).filter(Airport.code==search_data.destination.upper()).first()
+
+    if not origin_airport or not destination_airport:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Origin or destination airport not found.")
+    
+    flights=db.query(Flight).filter(
+        Flight.origin_id==origin_airport.id,
+        Flight.destination_id==destination_airport.id,
+        func.date(Flight.departure_time)==departure_date
+    ).all()
+
+    if not flights:
+        return {"message": "No flights found for this route and date."}
+    results=[]
+
+    available_classes=db.query(Seat._class).filter(Seat.flight_id.in_([f.id for f in flights]), Seat.is_available==True).distinct().all()
+
+    unique_classes=set([cls[0] for cls in available_classes])
+
+    for flight in flights:
+        flight_data: Dict[str, Any] = {
+            "flight_id": flight.id,
+            "flight_number": flight.flight_number,
+            "origin": origin_airport.code,
+            "destination": destination_airport.code,
+            "departure_time": flight.departure_time,
+            "arrival_time": flight.arrival_time,
+            "base_economy_price": float(flight.base_price),
+            "pricing": {}
+        }
+
+        for seat_class in unique_classes:
+
+            seats_available = db.query(Seat).filter(
+                and_(Seat.flight_id == flight.id, Seat.is_available == True, Seat._class == seat_class)
+            ).count()
+            
+            if seats_available > 0:
+                current_price = calculate_dynamic_price(flight, seat_class, db)
+                if current_price > 0:
+                    flight_data["pricing"][seat_class] = {
+                        "price": current_price,
+                        "seats_available": seats_available
+                    }
+        if flight_data["pricing"]:
+            results.append(flight_data)
+    return {"flights": results}
+
+
+@app.get("/flights/{flight_id}")
+def get_flight_details(flight_id: int, db: Session = Depends(get_db)):
+    flight=db.query(Flight).filter(Flight.id == flight_id).first()
+    if not flight:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flight not found.")
+    
+    airline = db.query(Airline).get(flight.airline_id)
+    origin = db.query(Airport).get(flight.origin_id)
+    destination = db.query(Airport).get(flight.destination_id)
+    seats = db.query(Seat).filter(Seat.flight_id == flight_id).all()
+
+    unique_classes = set(s._class for s in seats)
+    pricing_details = {}
+
+    for seat_class in unique_classes:
+        seats_available = db.query(Seat).filter(
+            and_(Seat.flight_id == flight_id, Seat.is_available == True, Seat._class == seat_class)
+        ).count()
+        if seats_available > 0:
+            pricing_details[seat_class] = {
+                "current_price": calculate_dynamic_price(flight, seat_class, db),
+                "seats_available": seats_available
+            }
+
+    seat_list = [{
+        "seat_number": s.seat_number,
+        "class": s._class,
+        "is_available": s.is_available
+    } for s in seats]
+
+    return {
+        "flight_id": flight.id,
+        "flight_number": flight.flight_number,
+        "airline_name": airline.name,
+        "origin_airport": origin.code,
+        "destination_airport": destination.code,
+        "departure_time": flight.departure_time,
+        "arrival_time": flight.arrival_time,
+        "base_economy_price": float(flight.base_price),
+        "dynamic_pricing": pricing_details,
+        "seats": seat_list
+    }
+
+@app.post("/bookings/create", response_model=BookingResponse)
+def create_booking(booking_data: BookingSchema, db: Session = Depends(get_db)):
+    seat = db.query(Seat).filter(
+        and_(
+            Seat.flight_id == booking_data.flight_id,
+            Seat.seat_number == booking_data.seat_number
+        )
+    ).first()
+
+    if not seat:
+        raise HTTPException(status_code=404, detail="Seat not found.")
+    if not seat.is_available:
+        raise HTTPException(status_code=409, detail="Seat is already booked.")
+    
+    flight = db.query(Flight).get(booking_data.flight_id)
+    if not flight:
+        raise HTTPException(status_code=404, detail="Flight not found.")
+   
+  
+    final_price = calculate_dynamic_price(flight, seat._class, db)
+    
+    try:
+        # 1. Marking the seat as unavailable
+        seat.is_available = False
+        db.add(seat)
+
+        # 2. Creating the booking record
+        new_booking = Booking(
+            pnr=generate_pnr(),
+            flight_id=booking_data.flight_id,
+            passenger_name=booking_data.passenger_name,
+            total_price=final_price
+        )
+        db.add(new_booking)
+
+        db.commit()
+        db.refresh(new_booking)
+
+        return {"message": "Booking successful!", "pnr": new_booking.pnr, "total_price": float(new_booking.total_price)}
+    
+    except Exception as e:
+        db.rollback()
+        print(f"Booking transaction failed: {e}")
+        raise HTTPException(status_code=500, detail="Booking failed due to a system error. Please try again.")
