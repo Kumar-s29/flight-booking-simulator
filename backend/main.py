@@ -40,10 +40,30 @@ class BookingRequest(BaseModel):
     flight_id: int
     passenger_name: str
     seat_number: str
+
 class BookingResponse(BaseModel):
     message: str
     pnr: str
     total_price: float
+
+class BookingDetails(BaseModel):
+    pnr: str
+    flight_number: str
+    origin: str
+    destination: str
+    departure_time: datetime
+    passenger_name: str
+    total_price: float
+    booking_date: datetime
+
+class AirportListSchema(BaseModel):
+    code: str
+    name: str
+    city: str
+
+class AirlineListSchema(BaseModel):
+    id: int
+    name: str
 
 # SQLAlchemy ORM models
 class Base(DeclarativeBase):
@@ -319,3 +339,75 @@ def create_booking(booking_data: BookingSchema, db: Session = Depends(get_db)):
         db.rollback()
         print(f"Booking transaction failed: {e}")
         raise HTTPException(status_code=500, detail="Booking failed due to a system error. Please try again.")
+
+# Booking Management Endpoints
+
+@app.get("/bookings/{pnr}",response_model=BookingDetails)
+def get_booking_details(pnr: str, db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.pnr == pnr.upper()).first()
+    
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found.")
+
+    flight = db.query(Flight).get(booking.flight_id)
+    origin = db.query(Airport).get(flight.origin_id)
+    destination = db.query(Airport).get(flight.destination_id)
+    
+    return {
+        "pnr": booking.pnr,
+        "flight_number": flight.flight_number,
+        "origin": f"{origin.city} ({origin.code})",
+        "destination": f"{destination.city} ({destination.code})",
+        "departure_time": flight.departure_time,
+        "passenger_name": booking.passenger_name,
+        "total_price": float(booking.total_price),
+        "booking_date": booking.booking_date
+    }
+
+
+@app.delete("/bookings/{pnr}")
+def cancel_booking(pnr: str, db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.pnr == pnr.upper()).first()
+    
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found.")
+
+    seat = db.query(Seat).filter(
+        and_(Seat.flight_id == booking.flight_id, Seat.is_available == False)
+    ).first()
+    
+    if not seat:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Seat associated with this booking could not be found or is already marked available.")
+    try:
+        seat.is_available = True
+        db.add(seat)
+        db.delete(booking)
+        db.commit()
+        return {"message": f"Booking {pnr.upper()} successfully cancelled. Seat {seat.seat_number} is now available."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Cancellation failed due to a system error.")
+
+
+# Background Process
+
+@app.post("/admin/simulate_demand")
+def simulate_demand_changes(db: Session = Depends(get_db)):
+    flights_to_update = db.query(Flight).filter(Flight.departure_time > datetime.now()).all()
+    
+    updates_count = 0
+    new_demand_level = 1.0
+    
+    for flight in flights_to_update:
+        new_demand_level = round(random.uniform(0.95, 1.05), 3)
+        flight.demand_level = new_demand_level
+        db.add(flight)
+        updates_count += 1
+    
+    try:
+        db.commit()
+        return {"message": f"Simulated demand updated for {updates_count} flights.",
+                "example_demand_level": new_demand_level}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update demand: {str(e)}")
