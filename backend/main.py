@@ -1,16 +1,20 @@
 # backend/main.py
 
-from fastapi import FastAPI, Depends, HTTPException, status
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, DECIMAL, ForeignKey, and_
+from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, DECIMAL, ForeignKey, and_, Date
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.sql import func
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from datetime import datetime, timedelta
+from pydantic import BaseModel, EmailStr
+from datetime import datetime, timedelta, date
 import random
+import string
 from dotenv import load_dotenv
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import bcrypt
+from jose import JWTError, jwt
 
 load_dotenv()
 
@@ -18,6 +22,11 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set")
+
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # configuration
 engine = create_engine(DATABASE_URL)
@@ -67,6 +76,18 @@ class Seat(Base):
     is_available = Column(Boolean)
     _class = Column("class", String)
 
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    first_name = Column(String, nullable=False)
+    last_name = Column(String, nullable=False)
+    phone = Column(String)
+    date_of_birth = Column(Date)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
 # Basic Pydantic models for API responses
 class FlightSearchRequest(BaseModel):
     origin: str
@@ -84,9 +105,270 @@ class AirlineListSchema(BaseModel):
 
 app = FastAPI()
 
+# ============================================================================
+# AUTHENTICATION MODELS
+# ============================================================================
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: str
+    last_name: str
+    phone: Optional[str] = None
+    date_of_birth: Optional[date] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    first_name: str
+    last_name: str
+    phone: Optional[str]
+    date_of_birth: Optional[date]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    date_of_birth: Optional[date] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: UserResponse
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+# ============================================================================
+# AUTHENTICATION HELPER FUNCTIONS
+# ============================================================================
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against a hash using bcrypt"""
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def get_password_hash(password: str) -> str:
+    """Hash a password using bcrypt"""
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def get_current_user(token: str = Depends(lambda: None), db: Session = Depends(get_db)) -> User:
+    """Get current user from JWT token - optional authentication"""
+    if not token:
+        return None
+    
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+    
+    user = db.query(User).filter(User.email == token_data.email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+# CORS middleware configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:3001"],  # Vite ports
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Flight Booking Simulator API"}
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.post("/auth/register", response_model=Token)
+def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
+    """Register a new user"""
+    # Check if user already exists
+    existing_user = db.query(User).filter(User.email == user_data.email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create new user
+    hashed_password = get_password_hash(user_data.password)
+    new_user = User(
+        email=user_data.email,
+        password_hash=hashed_password,
+        first_name=user_data.first_name,
+        last_name=user_data.last_name,
+        phone=user_data.phone,
+        date_of_birth=user_data.date_of_birth
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": new_user.email}, expires_delta=access_token_expires
+    )
+    
+    user_response = UserResponse.from_orm(new_user)
+    
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        user=user_response
+    )
+
+@app.post("/auth/login", response_model=Token)
+def login_user(credentials: UserLogin, db: Session = Depends(get_db)):
+    """Authenticate user and return JWT token"""
+    user = db.query(User).filter(User.email == credentials.email).first()
+    
+    if not user or not verify_password(credentials.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    user_response = UserResponse.from_orm(user)
+    
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        user=user_response
+    )
+
+@app.get("/auth/me", response_model=UserResponse)
+def get_current_user_info(token: str, db: Session = Depends(get_db)):
+    """Get current logged in user information"""
+    user = get_current_user(token, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    return UserResponse.from_orm(user)
+
+@app.put("/auth/profile", response_model=UserResponse)
+def update_user_profile(
+    user_update: UserUpdate,
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """Update user profile information"""
+    user = get_current_user(token, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    # Update fields if provided
+    if user_update.first_name is not None:
+        user.first_name = user_update.first_name
+    if user_update.last_name is not None:
+        user.last_name = user_update.last_name
+    if user_update.phone is not None:
+        user.phone = user_update.phone
+    if user_update.date_of_birth is not None:
+        user.date_of_birth = user_update.date_of_birth
+    
+    user.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(user)
+    
+    return UserResponse.from_orm(user)
+
+@app.get("/auth/bookings", response_model=List[Dict])
+def get_user_bookings(token: str, db: Session = Depends(get_db)):
+    """Get all bookings for the authenticated user"""
+    user = get_current_user(token, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    # Get bookings for this user
+    bookings = db.query(Booking).filter(Booking.user_id == user.id).all()
+    
+    result = []
+    for booking in bookings:
+        flight = db.query(Flight).filter(Flight.id == booking.flight_id).first()
+        if flight:
+            origin = db.query(Airport).filter(Airport.id == flight.origin_id).first()
+            destination = db.query(Airport).filter(Airport.id == flight.destination_id).first()
+            seat = db.query(Seat).filter(Seat.id == booking.seat_id).first() if booking.seat_id else None
+            
+            result.append({
+                "id": booking.id,
+                "pnr": booking.pnr,
+                "flight_id": booking.flight_id,
+                "flight_number": flight.flight_number,
+                "origin": {
+                    "code": origin.code,
+                    "name": origin.name,
+                    "city": origin.city
+                } if origin else None,
+                "destination": {
+                    "code": destination.code,
+                    "name": destination.name,
+                    "city": destination.city
+                } if destination else None,
+                "departure_time": flight.departure_time.isoformat() if flight.departure_time else None,
+                "arrival_time": flight.arrival_time.isoformat() if flight.arrival_time else None,
+                "passenger_name": booking.passenger_name,
+                "passenger_email": booking.passenger_email,
+                "passenger_phone": booking.passenger_phone,
+                "seat_number": seat.seat_number if seat else None,
+                "seat_class": seat._class if seat else None,
+                "total_price": float(booking.total_price),
+                "booking_status": booking.booking_status if hasattr(booking, 'booking_status') else 'confirmed',
+                "booking_time": booking.booking_date.isoformat() if booking.booking_date else None
+            })
+    
+    return result
 
 # Utility Lookup Endpoints
 @app.get("/airports", response_model=List[AirportListSchema])
@@ -312,8 +594,13 @@ class Booking(Base):
     id = Column(Integer, primary_key=True)
     pnr = Column(String, unique=True)
     flight_id = Column(Integer, ForeignKey('flights.id'))
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True)  # Link to authenticated user
     passenger_name = Column(String)
+    passenger_email = Column(String, nullable=True)
+    passenger_phone = Column(String, nullable=True)
+    seat_id = Column(Integer, ForeignKey('seats.id'), nullable=True)
     total_price = Column(DECIMAL(10,2))
+    booking_status = Column(String, default='confirmed')
     booking_date = Column(DateTime, server_default=func.now())
 
 class PreBooking(Base):
@@ -322,8 +609,11 @@ class PreBooking(Base):
     pre_booking_id = Column(String(10), unique=True)
     flight_id = Column(Integer, ForeignKey('flights.id'))
     seat_id = Column(Integer, ForeignKey('seats.id'), unique=True)  # Seat is temporarily held
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True)  # Link to authenticated user
     total_price = Column(DECIMAL(10, 2))
     passenger_name = Column(String)
+    passenger_email = Column(String, nullable=True)
+    passenger_phone = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 # Booking-related Pydantic Models
@@ -358,6 +648,15 @@ class BookingDetails(BaseModel):
     total_price: float
     booking_date: datetime
 
+# Additional API models for simplified frontend integration
+class CreateBookingRequest(BaseModel):
+    flight_id: int
+    passenger_name: str
+    passenger_email: str
+    passenger_phone: str
+    seat_id: int
+    seat_class: str
+
 # Helper Functions for Booking Management
 def generate_pnr():
     return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
@@ -371,7 +670,22 @@ def generate_pre_booking_id():
 # and returns a pre-booking ID for payment simulation.
 # Implements concurrency control using DB transactions.
 @app.post("/bookings/initiate", response_model=BookingInitiationResponse, status_code=status.HTTP_202_ACCEPTED)
-def initiate_booking(booking_data: BookingRequest, db: Session = Depends(get_db)):
+def initiate_booking(
+    booking_data: BookingRequest, 
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(None)
+):
+    # Try to get user_id from token if provided
+    user_id = None
+    if authorization and authorization.startswith('Bearer '):
+        token = authorization.replace('Bearer ', '')
+        try:
+            user = get_current_user(token, db)
+            if user:
+                user_id = user.id
+        except:
+            pass  # Guest booking if token is invalid
+    
     seat = db.query(Seat).filter(
         and_(
             Seat.flight_id == booking_data.flight_id,
@@ -406,8 +720,11 @@ def initiate_booking(booking_data: BookingRequest, db: Session = Depends(get_db)
             pre_booking_id=pre_booking_id,
             flight_id=booking_data.flight_id,
             seat_id=seat.id,
+            user_id=user_id,  # Store user_id if authenticated
             total_price=final_price,
-            passenger_name=booking_data.passenger_name
+            passenger_name=booking_data.passenger_name,
+            passenger_email=booking_data.passenger_email if hasattr(booking_data, 'passenger_email') else None,
+            passenger_phone=booking_data.passenger_phone if hasattr(booking_data, 'passenger_phone') else None
         )
         db.add(new_pre_booking)
 
@@ -459,7 +776,11 @@ def process_payment(payment_request: BookingCompletionRequest, db: Session = Dep
         new_booking = Booking(
             pnr=generate_pnr(),
             flight_id=pre_booking.flight_id,
+            user_id=pre_booking.user_id,  # Transfer user_id from pre-booking
+            seat_id=pre_booking.seat_id,  # Store the seat information
             passenger_name=pre_booking.passenger_name,
+            passenger_email=pre_booking.passenger_email,
+            passenger_phone=pre_booking.passenger_phone,
             total_price=pre_booking.total_price  # Use the price held during initiation
         )
         db.add(new_booking)
@@ -536,3 +857,166 @@ def cancel_booking(pnr: str, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Cancellation failed due to a system error.")
+
+# ============================================================================
+# Additional Endpoints for Frontend Integration
+# ============================================================================
+
+# Get bookings by email
+@app.get("/bookings/email/{email}")
+def get_bookings_by_email(email: str, db: Session = Depends(get_db)):
+    """Retrieve all bookings for a given email address"""
+    bookings = db.query(Booking).filter(Booking.passenger_email == email).all()
+    if not bookings:
+        return []
+    
+    results = []
+    for booking in bookings:
+        flight = db.query(Flight).get(booking.flight_id)
+        if flight:
+            origin = db.query(Airport).get(flight.origin_id)
+            destination = db.query(Airport).get(flight.destination_id)
+            airline = db.query(Airline).get(flight.airline_id)
+            
+            results.append({
+                "id": booking.id,
+                "pnr": booking.pnr,
+                "flight_number": flight.flight_number,
+                "airline": airline.name if airline else "Unknown",
+                "origin": f"{origin.city} ({origin.code})" if origin else "Unknown",
+                "destination": f"{destination.city} ({destination.code})" if destination else "Unknown",
+                "departure_time": flight.departure_time,
+                "passenger_name": booking.passenger_name,
+                "total_price": float(booking.total_price),
+                "booking_status": booking.booking_status,
+                "booking_time": booking.booking_time
+            })
+    
+    return results
+
+# Get seats for a specific flight and class
+@app.get("/flights/{flight_id}/seats")
+def get_flight_seats(flight_id: int, seat_class: Optional[str] = None, db: Session = Depends(get_db)):
+    """Get available seats for a flight, optionally filtered by class"""
+    flight = db.query(Flight).filter(Flight.id == flight_id).first()
+    if not flight:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flight not found")
+    
+    query = db.query(Seat).filter(Seat.flight_id == flight_id)
+    
+    if seat_class:
+        query = query.filter(Seat._class == seat_class)
+    
+    seats = query.all()
+    
+    # Calculate pricing for each class
+    pricing = {}
+    unique_classes = set(s._class for s in seats)
+    for cls in unique_classes:
+        price = calculate_dynamic_price(flight, cls, db)
+        pricing[cls] = price
+    
+    return {
+        "seats": [
+            {
+                "id": s.id,
+                "seat_number": s.seat_number,
+                "is_available": s.is_available,
+                "class": s._class,
+                "flight_id": s.flight_id
+            }
+            for s in seats
+        ],
+        "pricing": pricing
+    }
+
+# Get dynamic pricing for a flight and class
+@app.get("/flights/{flight_id}/pricing")
+def get_flight_pricing(flight_id: int, seat_class: str = "Economy", db: Session = Depends(get_db)):
+    """Get dynamic pricing for a specific flight and seat class"""
+    flight = db.query(Flight).filter(Flight.id == flight_id).first()
+    if not flight:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flight not found")
+    
+    price = calculate_dynamic_price(flight, seat_class, db)
+    
+    return {"price": price}
+
+# Create simplified booking endpoint
+@app.post("/bookings")
+def create_booking_simple(
+    booking_data: CreateBookingRequest,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Create a new booking with seat selection (supports both authenticated and guest users)"""
+    # Get user if token provided
+    user = None
+    if token:
+        try:
+            user = get_current_user(token, db)
+        except HTTPException:
+            pass  # Continue as guest booking
+    
+    # Verify flight exists
+    flight = db.query(Flight).filter(Flight.id == booking_data.flight_id).first()
+    if not flight:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flight not found")
+    
+    # Verify seat exists and is available
+    seat = db.query(Seat).filter(Seat.id == booking_data.seat_id).first()
+    if not seat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Seat not found")
+    
+    if not seat.is_available:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Seat is not available")
+    
+    # Calculate price
+    total_price = calculate_dynamic_price(flight, booking_data.seat_class, db)
+    
+    # Generate unique PNR
+    pnr = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    
+    # Check PNR uniqueness
+    while db.query(Booking).filter(Booking.pnr == pnr).first():
+        pnr = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    
+    try:
+        # Mark seat as unavailable
+        seat.is_available = False
+        db.add(seat)
+        
+        # Create booking
+        new_booking = Booking(
+            pnr=pnr,
+            flight_id=booking_data.flight_id,
+            user_id=user.id if user else None,  # Link to user if authenticated
+            passenger_name=booking_data.passenger_name,
+            passenger_email=booking_data.passenger_email,
+            passenger_phone=booking_data.passenger_phone,
+            seat_id=booking_data.seat_id,
+            total_price=total_price,
+            booking_status='confirmed',
+            booking_date=datetime.now()
+        )
+        
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+        
+        return {
+            "id": new_booking.id,
+            "pnr": new_booking.pnr,
+            "flight_id": new_booking.flight_id,
+            "passenger_name": new_booking.passenger_name,
+            "passenger_email": new_booking.passenger_email,
+            "passenger_phone": new_booking.passenger_phone,
+            "seat_id": new_booking.seat_id,
+            "total_price": float(new_booking.total_price),
+            "booking_status": new_booking.booking_status,
+            "booking_time": new_booking.booking_time
+        }
+    
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Booking creation failed: {str(e)}")
