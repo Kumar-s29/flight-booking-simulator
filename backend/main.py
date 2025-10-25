@@ -803,7 +803,7 @@ def process_payment(payment_request: BookingCompletionRequest, db: Session = Dep
         raise HTTPException(status_code=500, detail="Final booking record creation failed.")
 
 # Booking History Retrieval
-@app.get("/bookings/{pnr}", response_model=BookingDetails)
+@app.get("/bookings/{pnr}")
 def get_booking_details(pnr: str, db: Session = Depends(get_db)):
     booking = db.query(Booking).filter(Booking.pnr == pnr.upper()).first()
     
@@ -813,16 +813,34 @@ def get_booking_details(pnr: str, db: Session = Depends(get_db)):
     flight = db.query(Flight).get(booking.flight_id)
     origin = db.query(Airport).get(flight.origin_id)
     destination = db.query(Airport).get(flight.destination_id)
+    seat = db.query(Seat).get(booking.seat_id) if booking.seat_id else None
     
     return {
+        "id": booking.id,
         "pnr": booking.pnr,
+        "flight_id": booking.flight_id,
         "flight_number": flight.flight_number,
-        "origin": f"{origin.city} ({origin.code})",
-        "destination": f"{destination.city} ({destination.code})",
-        "departure_time": flight.departure_time,
         "passenger_name": booking.passenger_name,
+        "passenger_email": booking.passenger_email,
+        "passenger_phone": booking.passenger_phone,
+        "seat_id": booking.seat_id,
+        "seat_number": seat.seat_number if seat else None,
+        "seat_class": seat._class if seat else None,
         "total_price": float(booking.total_price),
-        "booking_date": booking.booking_date
+        "booking_status": booking.booking_status,
+        "booking_time": booking.booking_date,
+        "origin": {
+            "code": origin.code,
+            "name": origin.name,
+            "city": origin.city
+        },
+        "destination": {
+            "code": destination.code,
+            "name": destination.name,
+            "city": destination.city
+        },
+        "departure_time": flight.departure_time,
+        "arrival_time": flight.arrival_time
     }
 
 # Booking Cancellation
@@ -876,20 +894,34 @@ def get_bookings_by_email(email: str, db: Session = Depends(get_db)):
         if flight:
             origin = db.query(Airport).get(flight.origin_id)
             destination = db.query(Airport).get(flight.destination_id)
-            airline = db.query(Airline).get(flight.airline_id)
+            seat = db.query(Seat).get(booking.seat_id) if booking.seat_id else None
             
             results.append({
                 "id": booking.id,
                 "pnr": booking.pnr,
+                "flight_id": booking.flight_id,
                 "flight_number": flight.flight_number,
-                "airline": airline.name if airline else "Unknown",
-                "origin": f"{origin.city} ({origin.code})" if origin else "Unknown",
-                "destination": f"{destination.city} ({destination.code})" if destination else "Unknown",
-                "departure_time": flight.departure_time,
                 "passenger_name": booking.passenger_name,
+                "passenger_email": booking.passenger_email,
+                "passenger_phone": booking.passenger_phone,
+                "seat_id": booking.seat_id,
+                "seat_number": seat.seat_number if seat else None,
+                "seat_class": seat._class if seat else None,
                 "total_price": float(booking.total_price),
                 "booking_status": booking.booking_status,
-                "booking_time": booking.booking_time
+                "booking_time": booking.booking_date,
+                "origin": {
+                    "code": origin.code,
+                    "name": origin.name,
+                    "city": origin.city
+                },
+                "destination": {
+                    "code": destination.code,
+                    "name": destination.name,
+                    "city": destination.city
+                },
+                "departure_time": flight.departure_time,
+                "arrival_time": flight.arrival_time
             })
     
     return results
