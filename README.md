@@ -307,26 +307,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-## 🚢 Deployment
-
-### Backend Deployment (Railway/Heroku)
-
-1. Set environment variables
-2. Configure PostgreSQL database
-3. Deploy using Git or CLI
-
-### Frontend Deployment (Vercel/Netlify)
-
-1. Build the project: `npm run build`
-2. Deploy the `dist` folder
-3. Set API URL environment variable
-
-## 🐛 Known Issues
-
-- Seat selection requires flight_id property (ensure data structure consistency)
-- Email search requires exact email match
-- PDF ticket generation works best in modern browsers
-
 ## 🔮 Future Enhancements
 
 - [ ] Multi-city flight search
@@ -342,16 +322,6 @@ VITE_API_BASE_URL=http://localhost:8000
 - [ ] Baggage management
 - [ ] In-flight meal selection
 
-## 👥 Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
@@ -362,20 +332,12 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - GitHub: [@Kumar-s29](https://github.com/Kumar-s29)
 
-## 🙏 Acknowledgments
-
-- FastAPI documentation and community
-- React and TypeScript communities
-- Shadcn/ui for beautiful components
-- PostgreSQL documentation
-- All open-source contributors
-
 ## 📞 Support
 
 For issues and questions:
 
 - Create an issue on GitHub
-- Contact: [your-email@example.com]
+- Contact: [swamykumar29603@gmail.com]
 
 ## 📊 Project Statistics
 
