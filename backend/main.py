@@ -198,7 +198,12 @@ def get_current_user(token: str = Depends(lambda: None), db: Session = Depends(g
 # CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:3001"],  # Vite ports
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000", 
+        "http://localhost:3001",
+        "https://flight-booking-simulator-frontend.onrender.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
