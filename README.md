@@ -2,6 +2,14 @@
 
 A full-stack flight booking application built with React, TypeScript, FastAPI, and PostgreSQL. This application simulates a complete airline booking system with features like flight search, seat selection, payment processing, and booking management.
 
+## 🌐 Live Demo
+
+**Frontend**: [https://flight-booking-simulator-frontend.onrender.com](https://flight-booking-simulator-frontend.onrender.com)
+
+**Backend API**: [https://flight-booking-simulator-backend.onrender.com](https://flight-booking-simulator-backend.onrender.com)
+
+> **Note**: The services are hosted on Render's free tier, so initial load may take 30-60 seconds as the server spins up from sleep mode.
+
 ## 🚀 Features
 
 ### User Features
